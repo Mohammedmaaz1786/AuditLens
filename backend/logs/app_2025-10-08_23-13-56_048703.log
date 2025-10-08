@@ -1,0 +1,15 @@
+2025-10-08 23:13:56.052 | INFO     | app.services.ai_extractor:__init__:24 - Gemini AI (gemini-2.0-flash-exp) initialized successfully
+2025-10-08 23:14:30.495 | INFO     | main:process_invoice:95 - Processing file: img1.png with language: eng
+2025-10-08 23:14:30.496 | INFO     | app.services.document_processor:process_document:52 - Starting processing for img1.png
+2025-10-08 23:14:30.637 | INFO     | app.services.document_processor:process_document:64 - Converted to 1 page(s)
+2025-10-08 23:14:30.638 | INFO     | app.services.document_processor:process_document:71 - Processing page 1/1
+2025-10-08 23:14:30.819 | INFO     | app.services.image_preprocessor:_is_clean_document:82 - Document quality check - Variance: 1387.12, Std: 40.89, Clean: True
+2025-10-08 23:14:30.863 | INFO     | app.services.image_preprocessor:preprocess:39 - Clean document detected, using minimal preprocessing
+2025-10-08 23:14:38.180 | INFO     | app.services.document_processor:_perform_ocr:219 - PSM 1 achieved confidence: 0.54
+2025-10-08 23:14:43.794 | INFO     | app.services.document_processor:_perform_ocr:219 - PSM 6 achieved confidence: 0.67
+2025-10-08 23:14:43.795 | INFO     | app.services.document_processor:process_document:80 - Page 1 OCR confidence: 0.67
+2025-10-08 23:14:43.795 | INFO     | app.services.document_processor:process_document:86 - Using AI extraction for structured data...
+2025-10-08 23:14:43.796 | INFO     | app.services.ai_extractor:extract_invoice_data:43 - Sending text to Gemini AI for extraction...
+2025-10-08 23:14:47.340 | INFO     | app.services.ai_extractor:extract_invoice_data:60 - AI extraction successful
+2025-10-08 23:14:47.341 | INFO     | app.services.document_processor:process_document:109 - Processing completed in 16.84s with confidence 0.94
+2025-10-08 23:14:47.343 | INFO     | main:process_invoice:116 - Successfully processed img1.png

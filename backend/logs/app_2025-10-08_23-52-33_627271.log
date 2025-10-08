@@ -1,0 +1,2 @@
+2025-10-08 23:52:33.631 | INFO     | app.services.ai_extractor:__init__:24 - Gemini AI (gemini-2.0-flash) initialized successfully
+2025-10-08 23:52:33.633 | INFO     | app.services.fraud_detector:__init__:45 - FraudDetector initialized

@@ -1,0 +1,1 @@
+2025-10-08 23:09:51.400 | WARNING  | app.services.ai_extractor:__init__:17 - No Google API key found. AI extraction will be disabled.
