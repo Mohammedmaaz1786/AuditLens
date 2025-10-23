@@ -36,3 +36,22 @@ next-env.d.ts
 # IDE
 .vscode
 .idea
+
+# Backend API
+backend-api/uploads/*
+backend-api/logs/*
+!backend-api/uploads/.gitkeep
+!backend-api/logs/.gitkeep
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+ocr-service/uploads/*
+ocr-service/logs/*
+

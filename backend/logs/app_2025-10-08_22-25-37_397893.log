@@ -1,5 +1,0 @@
-2025-10-08 22:35:42.880 | INFO     | main:process_invoice:95 - Processing file: invoice (2).pdf with language: eng
-2025-10-08 22:35:42.883 | INFO     | app.services.document_processor:process_document:50 - Starting processing for invoice (2).pdf
-2025-10-08 22:35:42.899 | ERROR    | app.services.document_processor:_file_to_images:159 - File conversion error: Unable to get page count. Is poppler installed and in PATH?
-2025-10-08 22:35:42.900 | ERROR    | app.services.document_processor:process_document:122 - Processing failed for invoice (2).pdf: Unable to get page count. Is poppler installed and in PATH?
-2025-10-08 22:35:42.901 | INFO     | main:process_invoice:116 - Successfully processed invoice (2).pdf

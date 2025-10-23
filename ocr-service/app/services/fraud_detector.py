@@ -1,0 +1,933 @@
+"""
+Comprehensive fraud detection system using multiple ML algorithms.
+
+This module integrates with the existing OCR pipeline to detect fraudulent invoices
+using various techniques including duplicate detection, anomaly detection, and
+pattern-based fraud identification.
+"""
+
+import hashlib
+import json
+import os
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from collections import defaultdict
+import numpy as np
+from loguru import logger
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure
+
+try:
+    from sklearn.ensemble import IsolationForest, RandomForestClassifier
+    from sklearn.cluster import DBSCAN
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sklearn.linear_model import LogisticRegression
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    logger.warning("scikit-learn not installed. ML-based fraud detection will be limited.")
+
+
+class FraudDetector:
+    """Comprehensive fraud detection system with MongoDB persistence"""
+    
+    def __init__(self):
+        # MongoDB connection
+        self.mongodb_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017/auditlens")
+        self.db_client = None
+        self.db = None
+        self.invoices_collection = None
+        self._connect_to_mongodb()
+        
+        # In-memory cache for performance
+        self.invoice_cache = []  # Cache last 100 invoices
+        self.vendor_profiles = defaultdict(dict)  # Vendor risk profiles
+        self.scaler = StandardScaler() if SKLEARN_AVAILABLE else None
+        self.isolation_forest = None
+        self.tfidf_vectorizer = TfidfVectorizer(max_features=100) if SKLEARN_AVAILABLE else None
+        
+        # Thresholds (configurable via env)
+        self.duplicate_similarity_threshold = float(os.getenv("DUPLICATE_SIMILARITY_THRESHOLD", "0.85"))
+        self.amount_outlier_zscore = float(os.getenv("AMOUNT_OUTLIER_ZSCORE", "3.0"))
+        self.high_risk_score_threshold = float(os.getenv("HIGH_RISK_SCORE_THRESHOLD", "0.7"))
+        
+        # Initialize cache from database
+        self._initialize_cache()
+        
+        logger.info("FraudDetector initialized with MongoDB persistence")
+    
+    def _connect_to_mongodb(self):
+        """Establish MongoDB connection"""
+        try:
+            self.db_client = MongoClient(self.mongodb_uri, serverSelectionTimeoutMS=5000)
+            # Test connection
+            self.db_client.admin.command('ping')
+            self.db = self.db_client.get_default_database()
+            self.invoices_collection = self.db.invoices
+            logger.info("✅ MongoDB connected successfully for fraud detection")
+        except ConnectionFailure as e:
+            logger.error(f"❌ MongoDB connection failed: {str(e)}")
+            logger.warning("Fraud detection will work with limited in-memory storage only")
+        except Exception as e:
+            logger.error(f"❌ MongoDB setup error: {str(e)}")
+    
+    def _initialize_cache(self):
+        """Load recent invoices into cache for performance"""
+        if self.invoices_collection is None:
+            return
+        
+        try:
+            # Get last 100 invoices
+            recent_invoices = list(self.invoices_collection.find(
+                {},
+                {
+                    "_id": 1,
+                    "invoiceNumber": 1,
+                    "vendorName": 1,
+                    "totalAmount": 1,
+                    "date": 1,
+                    "lineItems": 1,
+                    "createdAt": 1
+                }
+            ).sort("createdAt", -1).limit(100))
+            
+            for invoice in recent_invoices:
+                self.invoice_cache.append({
+                    "id": str(invoice.get("_id")),
+                    "invoice_number": invoice.get("invoiceNumber"),
+                    "vendor_name": invoice.get("vendorName"),
+                    "total_amount": invoice.get("totalAmount"),
+                    "date": invoice.get("date"),
+                    "line_items": invoice.get("lineItems", []),
+                    "hash": self._generate_invoice_hash({
+                        "invoice_number": invoice.get("invoiceNumber"),
+                        "vendor_name": invoice.get("vendorName"),
+                        "total_amount": invoice.get("totalAmount"),
+                        "date": invoice.get("date")
+                    })
+                })
+            
+            logger.info(f"✅ Loaded {len(self.invoice_cache)} invoices into cache")
+        except Exception as e:
+            logger.error(f"Failed to initialize cache: {str(e)}")
+    
+    def refresh_cache(self):
+        """Refresh the invoice cache from database (call after deletions/updates)"""
+        logger.info("🔄 Refreshing invoice cache from database...")
+        self.invoice_cache = []  # Clear existing cache
+        self._initialize_cache()
+    
+    def analyze_invoice(self, invoice_data: Dict, invoice_id: str = None) -> Dict:
+        """
+        Comprehensive fraud analysis of an invoice
+        
+        Args:
+            invoice_data: Extracted invoice data from OCR
+            invoice_id: Optional unique identifier for the invoice
+            
+        Returns:
+            Dictionary with fraud analysis results
+        """
+        results = {
+            "invoice_id": invoice_id,
+            "fraud_detected": False,
+            "risk_score": 0.0,
+            "risk_level": "LOW",
+            "detections": [],
+            "warnings": [],
+            "details": {}
+        }
+        
+        try:
+            # 1. Duplicate Invoice Detection
+            duplicate_result = self._detect_duplicates(invoice_data)
+            if duplicate_result["is_duplicate"]:
+                results["detections"].append({
+                    "type": "DUPLICATE_INVOICE",
+                    "severity": "HIGH",
+                    "description": duplicate_result["message"],
+                    "confidence": duplicate_result["confidence"]
+                })
+                results["fraud_detected"] = True
+            results["details"]["duplicate_check"] = duplicate_result
+            
+            # 2. Amount Anomaly Detection
+            amount_anomaly = self._detect_amount_anomalies(invoice_data)
+            if amount_anomaly["is_anomaly"]:
+                results["detections"].append({
+                    "type": "AMOUNT_ANOMALY",
+                    "severity": amount_anomaly["severity"],
+                    "description": amount_anomaly["message"],
+                    "confidence": amount_anomaly["confidence"]
+                })
+                if amount_anomaly["severity"] == "HIGH":
+                    results["fraud_detected"] = True
+            results["details"]["amount_check"] = amount_anomaly
+            
+            # 3. Vendor Risk Assessment
+            vendor_risk = self._assess_vendor_risk(invoice_data)
+            if vendor_risk["is_high_risk"]:
+                results["warnings"].append({
+                    "type": "VENDOR_RISK",
+                    "severity": "MEDIUM",
+                    "description": vendor_risk["message"],
+                    "confidence": vendor_risk["confidence"]
+                })
+            results["details"]["vendor_risk"] = vendor_risk
+            
+            # 4. Pattern-Based Fraud Detection
+            pattern_fraud = self._detect_pattern_fraud(invoice_data)
+            if pattern_fraud["suspicious_patterns"]:
+                for pattern in pattern_fraud["suspicious_patterns"]:
+                    results["warnings"].append({
+                        "type": "SUSPICIOUS_PATTERN",
+                        "severity": pattern["severity"],
+                        "description": pattern["description"],
+                        "confidence": pattern["confidence"]
+                    })
+                    if pattern["severity"] == "HIGH":
+                        results["fraud_detected"] = True
+            results["details"]["pattern_analysis"] = pattern_fraud
+            
+            # 5. Line Item Analysis
+            line_item_fraud = self._analyze_line_items(invoice_data)
+            if line_item_fraud["suspicious"]:
+                results["warnings"].append({
+                    "type": "LINE_ITEM_FRAUD",
+                    "severity": "MEDIUM",
+                    "description": line_item_fraud["message"],
+                    "confidence": line_item_fraud["confidence"]
+                })
+            results["details"]["line_item_check"] = line_item_fraud
+            
+            # Calculate overall risk score
+            risk_score = self._calculate_risk_score(results)
+            results["risk_score"] = risk_score
+            results["risk_level"] = self._get_risk_level(risk_score)
+            
+            # Store invoice for future comparisons
+            self._store_invoice(invoice_data, invoice_id)
+            
+            logger.info(f"Fraud analysis completed for invoice {invoice_id}: Risk Level = {results['risk_level']}")
+            
+        except Exception as e:
+            logger.error(f"Fraud detection error: {str(e)}")
+            results["error"] = str(e)
+        
+        return results
+    
+    def _detect_duplicates(self, invoice_data: Dict) -> Dict:
+        """Detect duplicate invoices using multiple techniques with MongoDB"""
+        result = {
+            "is_duplicate": False,
+            "confidence": 0.0,
+            "message": "",
+            "matches": []
+        }
+        
+        try:
+            # Generate invoice hash for exact duplicate detection
+            invoice_hash = self._generate_invoice_hash(invoice_data)
+            
+            # Method 1: Check MongoDB for exact hash match (most reliable)
+            if self.invoices_collection is not None:
+                try:
+                    # Query database for existing invoice with same key fields
+                    vendor_name = invoice_data.get("vendor_name") or invoice_data.get("vendorName", "")
+                    invoice_number = invoice_data.get("invoice_number") or invoice_data.get("invoiceNumber", "")
+                    total_amount = invoice_data.get("total_amount") or invoice_data.get("totalAmount", 0)
+                    invoice_date = invoice_data.get("invoice_date") or invoice_data.get("date", "")
+                    
+                    # Check for exact match in database
+                    existing_invoice = self.invoices_collection.find_one({
+                        "invoiceNumber": invoice_number,
+                        "vendorName": vendor_name,
+                        "totalAmount": total_amount
+                    })
+                    
+                    if existing_invoice:
+                        result["is_duplicate"] = True
+                        result["confidence"] = 1.0
+                        result["message"] = f"⚠️ DUPLICATE DETECTED: Exact match with existing invoice ID {existing_invoice.get('_id')}"
+                        result["matches"].append({
+                            "type": "exact_database",
+                            "invoice_id": str(existing_invoice.get("_id")),
+                            "invoice_number": existing_invoice.get("invoiceNumber"),
+                            "similarity": 1.0,
+                            "created_at": existing_invoice.get("createdAt")
+                        })
+                        logger.warning(f"🚨 DUPLICATE INVOICE DETECTED: {invoice_number} from vendor {vendor_name}")
+                        return result  # Return immediately on exact match
+                    
+                    # Method 2: Check for similar invoices (fuzzy matching)
+                    if SKLEARN_AVAILABLE and vendor_name:
+                        similar_invoices = list(self.invoices_collection.find({
+                            "vendorName": vendor_name
+                        }).limit(50))  # Limit to recent invoices from same vendor
+                        
+                        for historical in similar_invoices:
+                            similarity = self._calculate_text_similarity(invoice_data, {
+                                "vendor_name": historical.get("vendorName"),
+                                "invoice_number": historical.get("invoiceNumber"),
+                                "total_amount": historical.get("totalAmount")
+                            })
+                            
+                            if similarity > self.duplicate_similarity_threshold:
+                                result["is_duplicate"] = True
+                                result["confidence"] = similarity
+                                result["message"] = f"⚠️ DUPLICATE: Similar to invoice {historical.get('invoiceNumber')} (similarity: {similarity:.1%})"
+                                result["matches"].append({
+                                    "type": "fuzzy",
+                                    "invoice_id": str(historical.get("_id")),
+                                    "invoice_number": historical.get("invoiceNumber"),
+                                    "similarity": similarity
+                                })
+                                logger.warning(f"🚨 SIMILAR INVOICE DETECTED: {similarity:.1%} match with {historical.get('invoiceNumber')}")
+                                return result  # Return early to prevent double flagging
+                                
+                except Exception as db_error:
+                    logger.error(f"Database duplicate check error: {str(db_error)}")
+            
+            # Method 3: Check in-memory cache (backup) - only if not found in DB
+            if not result["is_duplicate"]:
+                for historical in self.invoice_cache:
+                    # Exact hash match
+                    if historical.get("hash") == invoice_hash:
+                        result["is_duplicate"] = True
+                        result["confidence"] = 1.0
+                        result["message"] = f"⚠️ DUPLICATE: Exact match with cached invoice {historical.get('invoice_number')}"
+                        result["matches"].append({
+                            "type": "exact_cache",
+                            "invoice_id": historical.get("id"),
+                            "invoice_number": historical.get("invoice_number"),
+                            "similarity": 1.0
+                        })
+                        logger.warning(f"🚨 DUPLICATE INVOICE (Cache): {historical.get('invoice_number')}")
+                        return result  # Return immediately to prevent further checks
+                    
+                    # Check for same vendor + amount + date (common duplicate scenario)
+                    if self._check_key_fields_match(invoice_data, historical):
+                        result["is_duplicate"] = True
+                        result["confidence"] = 0.95
+                        result["message"] = "⚠️ DUPLICATE: Same vendor, amount, and date detected"
+                        result["matches"].append({
+                            "type": "key_fields",
+                            "invoice_id": historical.get("id"),
+                            "invoice_number": historical.get("invoice_number"),
+                            "similarity": 0.95
+                        })
+                        logger.warning(f"🚨 DUPLICATE (Key Fields): Vendor={vendor_name}, Amount={total_amount}")
+                        return result  # Return immediately
+        
+        except Exception as e:
+            logger.error(f"Duplicate detection error: {str(e)}")
+        
+        if not result["is_duplicate"]:
+            logger.info(f"✅ No duplicates found for invoice {invoice_data.get('invoice_number', 'N/A')}")
+        
+        return result
+    
+    def _detect_amount_anomalies(self, invoice_data: Dict) -> Dict:
+        """Detect anomalous amounts using statistical methods with MongoDB data"""
+        result = {
+            "is_anomaly": False,
+            "confidence": 0.0,
+            "message": "",
+            "severity": "LOW",
+            "details": {}
+        }
+        
+        try:
+            total_amount = invoice_data.get("total_amount") or invoice_data.get("totalAmount")
+            if not total_amount:
+                return result
+            
+            total_amount = float(total_amount)
+            vendor_name = invoice_data.get("vendor_name") or invoice_data.get("vendorName")
+            
+            # Get vendor's historical amounts from MongoDB
+            vendor_amounts = self._get_vendor_amounts_from_db(vendor_name)
+            
+            if len(vendor_amounts) >= 3:  # Need at least 3 data points
+                mean_amount = np.mean(vendor_amounts)
+                std_amount = np.std(vendor_amounts)
+                
+                # Method 1: Z-score analysis
+                if std_amount > 0:
+                    z_score = abs((total_amount - mean_amount) / std_amount)
+                    
+                    if z_score > self.amount_outlier_zscore:
+                        result["is_anomaly"] = True
+                        result["confidence"] = min(z_score / 10.0, 1.0)
+                        result["severity"] = "HIGH" if z_score > 5 else "MEDIUM"
+                        result["message"] = f"⚠️ ANOMALY: Amount ${total_amount:,.2f} is {z_score:.1f} std deviations from vendor average ${mean_amount:,.2f}"
+                        result["details"]["z_score"] = float(z_score)
+                        result["details"]["vendor_avg"] = float(mean_amount)
+                        result["details"]["vendor_std"] = float(std_amount)
+                        logger.warning(f"🚨 AMOUNT ANOMALY: Z-score={z_score:.2f} for amount ${total_amount:,.2f}")
+                
+                # Method 2: IQR (Interquartile Range) analysis
+                q1, q3 = np.percentile(vendor_amounts, [25, 75])
+                iqr = q3 - q1
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                
+                if total_amount < lower_bound or total_amount > upper_bound:
+                    result["is_anomaly"] = True
+                    result["confidence"] = max(result["confidence"], 0.7)
+                    if not result["message"]:
+                        result["message"] = f"⚠️ ANOMALY: Amount ${total_amount:,.2f} outside typical range (${lower_bound:,.2f} - ${upper_bound:,.2f})"
+                    result["details"]["iqr_range"] = [float(lower_bound), float(upper_bound)]
+                    result["details"]["q1"] = float(q1)
+                    result["details"]["q3"] = float(q3)
+                    result["details"]["iqr"] = float(iqr)
+                    logger.warning(f"🚨 IQR ANOMALY: Amount ${total_amount:,.2f} outside [{lower_bound:.2f}, {upper_bound:.2f}]")
+            
+            # Method 3: Check for suspiciously round numbers
+            if total_amount > 0 and total_amount % 1000 == 0 and total_amount >= 5000:
+                result["warnings"] = result.get("warnings", [])
+                result["warnings"].append("Suspiciously round number (multiple of $1000)")
+                result["confidence"] = max(result["confidence"], 0.3)
+                logger.info(f"⚠️ Round number detected: ${total_amount:,.2f}")
+            
+            # Method 4: Isolation Forest (if enough data)
+            if SKLEARN_AVAILABLE and len(vendor_amounts) >= 10:
+                try:
+                    X = np.array(vendor_amounts + [total_amount]).reshape(-1, 1)
+                    iso_forest = IsolationForest(contamination=0.1, random_state=42)
+                    predictions = iso_forest.fit_predict(X)
+                    
+                    if predictions[-1] == -1:  # -1 means anomaly
+                        result["is_anomaly"] = True
+                        result["confidence"] = max(result["confidence"], 0.75)
+                        result["severity"] = "HIGH"
+                        if not result["message"]:
+                            result["message"] = f"⚠️ ML ANOMALY: Isolation Forest detected unusual amount ${total_amount:,.2f}"
+                        result["details"]["isolation_forest"] = "anomaly_detected"
+                        logger.warning(f"🚨 ISOLATION FOREST: Anomaly detected for ${total_amount:,.2f}")
+                except Exception as ml_error:
+                    logger.debug(f"Isolation Forest error: {str(ml_error)}")
+        
+        except Exception as e:
+            logger.error(f"Amount anomaly detection error: {str(e)}")
+        
+        if result["is_anomaly"]:
+            logger.info(f"✅ Amount anomaly check: ANOMALY FOUND (confidence={result['confidence']:.2f})")
+        else:
+            logger.info(f"✅ Amount anomaly check: Normal amount ${total_amount:,.2f}")
+        
+        return result
+    
+    def _get_vendor_amounts_from_db(self, vendor_name: str) -> List[float]:
+        """Get historical amounts for a vendor from MongoDB"""
+        amounts = []
+        
+        if not vendor_name:
+            return amounts
+        
+        try:
+            # Try MongoDB first
+            if self.invoices_collection is not None:
+                vendor_invoices = list(self.invoices_collection.find(
+                    {"vendorName": vendor_name},
+                    {"totalAmount": 1}
+                ).limit(100))
+                
+                amounts = [float(inv.get("totalAmount", 0)) for inv in vendor_invoices if inv.get("totalAmount")]
+                logger.debug(f"📊 Retrieved {len(amounts)} historical amounts for vendor {vendor_name} from MongoDB")
+            
+            # Fallback to cache
+            if not amounts:
+                for invoice in self.invoice_cache:
+                    inv_vendor = invoice.get("vendor_name", "")
+                    if inv_vendor and inv_vendor.lower() == vendor_name.lower():
+                        amount = invoice.get("total_amount")
+                        if amount:
+                            amounts.append(float(amount))
+                logger.debug(f"📊 Retrieved {len(amounts)} historical amounts for vendor {vendor_name} from cache")
+        
+        except Exception as e:
+            logger.error(f"Error retrieving vendor amounts: {str(e)}")
+        
+        return amounts
+    
+    def _assess_vendor_risk(self, invoice_data: Dict) -> Dict:
+        """Assess vendor risk factors with MongoDB data"""
+        result = {
+            "is_high_risk": False,
+            "confidence": 0.0,
+            "message": "",
+            "risk_factors": []
+        }
+        
+        try:
+            vendor_name = invoice_data.get("vendor_name") or invoice_data.get("vendorName")
+            if not vendor_name:
+                return result
+            
+            # Check if new vendor (from MongoDB)
+            vendor_invoice_count = 0
+            if self.invoices_collection is not None:
+                vendor_invoice_count = self.invoices_collection.count_documents({"vendorName": vendor_name})
+            else:
+                # Fallback to cache
+                vendor_invoice_count = sum(1 for inv in self.invoice_cache if inv.get("vendor_name") == vendor_name)
+            
+            is_new_vendor = vendor_invoice_count == 0
+            
+            if is_new_vendor:
+                result["risk_factors"].append({
+                    "factor": "NEW_VENDOR",
+                    "description": "⚠️ First transaction with this vendor",
+                    "risk_contribution": 0.3
+                })
+                logger.info(f"⚠️ NEW VENDOR DETECTED: {vendor_name}")
+            
+            # Check vendor address
+            vendor_address = invoice_data.get("vendor_address") or invoice_data.get("vendorAddress")
+            if not vendor_address or str(vendor_address).strip() in ["", "null", "None"]:
+                result["risk_factors"].append({
+                    "factor": "MISSING_ADDRESS",
+                    "description": "⚠️ Vendor address not provided (ghost vendor indicator)",
+                    "risk_contribution": 0.5
+                })
+                logger.warning(f"🚨 MISSING ADDRESS for vendor {vendor_name}")
+            
+            # Check vendor contact info
+            vendor_email = invoice_data.get("vendor_email") or invoice_data.get("vendorEmail")
+            vendor_phone = invoice_data.get("vendor_phone") or invoice_data.get("vendorPhone")
+            
+            if not vendor_email and not vendor_phone:
+                result["risk_factors"].append({
+                    "factor": "NO_CONTACT_INFO",
+                    "description": "⚠️ No email or phone number provided",
+                    "risk_contribution": 0.4
+                })
+                logger.warning(f"🚨 NO CONTACT INFO for vendor {vendor_name}")
+            
+            # Check for suspicious email domains
+            if vendor_email and any(domain in vendor_email.lower() for domain in ["gmail", "yahoo", "hotmail", "outlook"]):
+                result["risk_factors"].append({
+                    "factor": "PERSONAL_EMAIL",
+                    "description": "⚠️ Using personal email domain instead of business domain",
+                    "risk_contribution": 0.3
+                })
+                logger.info(f"⚠️ PERSONAL EMAIL detected for vendor {vendor_name}")
+            
+            # Check transaction frequency (rapid submission) - Enhanced
+            if self.invoices_collection is not None and vendor_invoice_count > 0:
+                recent_invoices = list(self.invoices_collection.find(
+                    {"vendorName": vendor_name},
+                    {"createdAt": 1, "date": 1, "totalAmount": 1, "invoiceDate": 1}
+                ).sort("createdAt", -1).limit(10))
+                
+                if len(recent_invoices) >= 2:
+                    # Check 1: Multiple invoices submitted within 1 hour (upload time)
+                    upload_timestamps = [inv.get("createdAt") for inv in recent_invoices if inv.get("createdAt")]
+                    if len(upload_timestamps) >= 2:
+                        upload_time_diffs = []
+                        for i in range(len(upload_timestamps) - 1):
+                            diff = abs((upload_timestamps[i] - upload_timestamps[i+1]).total_seconds() / 3600)  # hours
+                            upload_time_diffs.append(diff)
+                        
+                        if any(diff < 1 for diff in upload_time_diffs):
+                            result["risk_factors"].append({
+                                "factor": "RAPID_SUBMISSION",
+                                "description": "⚠️ Multiple invoices submitted within 1 hour",
+                                "risk_contribution": 0.4
+                            })
+                            logger.warning(f"🚨 RAPID SUBMISSION detected for vendor {vendor_name}")
+                    
+                    # Check 2: Multiple invoices with close invoice dates (invoice date fraud)
+                    from datetime import datetime
+                    invoice_dates = []
+                    for inv in recent_invoices:
+                        date_str = inv.get("date") or inv.get("invoiceDate")
+                        if date_str:
+                            try:
+                                if isinstance(date_str, str):
+                                    # Try parsing various date formats
+                                    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%d/%m/%Y", "%m/%d/%Y"]:
+                                        try:
+                                            parsed_date = datetime.strptime(date_str.split('T')[0] if 'T' in date_str else date_str.split(' ')[0], fmt.split('T')[0])
+                                            invoice_dates.append(parsed_date)
+                                            break
+                                        except:
+                                            continue
+                                elif isinstance(date_str, datetime):
+                                    invoice_dates.append(date_str)
+                            except Exception as e:
+                                logger.debug(f"Could not parse date: {date_str}")
+                    
+                    if len(invoice_dates) >= 2:
+                        # Sort dates to check intervals
+                        invoice_dates.sort(reverse=True)
+                        date_diffs_days = []
+                        for i in range(len(invoice_dates) - 1):
+                            diff_days = abs((invoice_dates[i] - invoice_dates[i+1]).days)
+                            date_diffs_days.append(diff_days)
+                        
+                        # Flag if invoices have dates within 2 days of each other
+                        if any(diff <= 2 for diff in date_diffs_days):
+                            result["risk_factors"].append({
+                                "factor": "SUSPICIOUS_INVOICE_DATES",
+                                "description": f"⚠️ Multiple invoices with dates within 2 days (dates: {', '.join([d.strftime('%Y-%m-%d') for d in invoice_dates[:3]])})",
+                                "risk_contribution": 0.5
+                            })
+                            logger.warning(f"🚨 SUSPICIOUS INVOICE DATES detected for vendor {vendor_name}: {date_diffs_days}")
+                        
+                        # Flag if too many invoices in a short period (e.g., 5+ invoices in 7 days)
+                        if len(invoice_dates) >= 5:
+                            date_range = (invoice_dates[0] - invoice_dates[-1]).days
+                            if date_range <= 7:
+                                result["risk_factors"].append({
+                                    "factor": "HIGH_FREQUENCY",
+                                    "description": f"⚠️ {len(invoice_dates)} invoices within {date_range} days - Unusually high frequency",
+                                    "risk_contribution": 0.6
+                                })
+                                logger.warning(f"🚨 HIGH FREQUENCY detected for vendor {vendor_name}: {len(invoice_dates)} invoices in {date_range} days")
+                    
+                    # Check 3: Sudden amount increases (amount spike detection)
+                    amounts_with_dates = []
+                    for inv in recent_invoices:
+                        amount = inv.get("totalAmount")
+                        date_str = inv.get("date") or inv.get("invoiceDate")
+                        if amount and date_str:
+                            try:
+                                if isinstance(date_str, str):
+                                    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%d/%m/%Y", "%m/%d/%Y"]:
+                                        try:
+                                            parsed_date = datetime.strptime(date_str.split('T')[0] if 'T' in date_str else date_str.split(' ')[0], fmt.split('T')[0])
+                                            amounts_with_dates.append((parsed_date, float(amount)))
+                                            break
+                                        except:
+                                            continue
+                                elif isinstance(date_str, datetime):
+                                    amounts_with_dates.append((date_str, float(amount)))
+                            except:
+                                pass
+                    
+                    if len(amounts_with_dates) >= 2:
+                        # Sort by date (most recent first)
+                        amounts_with_dates.sort(key=lambda x: x[0], reverse=True)
+                        
+                        # Check for sudden amount increases
+                        for i in range(len(amounts_with_dates) - 1):
+                            current_date, current_amount = amounts_with_dates[i]
+                            previous_date, previous_amount = amounts_with_dates[i + 1]
+                            
+                            if previous_amount > 0:
+                                increase_ratio = current_amount / previous_amount
+                                days_apart = (current_date - previous_date).days
+                                
+                                # Flag if amount increased by 2x or more within 30 days
+                                if increase_ratio >= 2.0 and days_apart <= 30:
+                                    result["risk_factors"].append({
+                                        "factor": "AMOUNT_SPIKE",
+                                        "description": f"🚨 Amount increased by {increase_ratio:.1f}x (${previous_amount:,.0f} → ${current_amount:,.0f}) within {days_apart} days",
+                                        "risk_contribution": 0.7
+                                    })
+                                    logger.warning(f"🚨 AMOUNT SPIKE detected for vendor {vendor_name}: {increase_ratio:.1f}x increase (${previous_amount:,.0f} → ${current_amount:,.0f}) in {days_apart} days")
+                                    break  # Only report the most significant spike
+                                
+                                # Also flag smaller increases in very short timeframes
+                                elif increase_ratio >= 1.5 and days_apart <= 7:
+                                    result["risk_factors"].append({
+                                        "factor": "RAPID_AMOUNT_INCREASE",
+                                        "description": f"⚠️ Amount increased by {increase_ratio:.1f}x (${previous_amount:,.0f} → ${current_amount:,.0f}) within {days_apart} days",
+                                        "risk_contribution": 0.5
+                                    })
+                                    logger.warning(f"🚨 RAPID AMOUNT INCREASE detected for vendor {vendor_name}: {increase_ratio:.1f}x increase in {days_apart} days")
+                                    break
+            
+            # Calculate overall risk
+            if result["risk_factors"]:
+                total_risk = sum(factor["risk_contribution"] for factor in result["risk_factors"])
+                result["confidence"] = min(total_risk, 1.0)
+                result["is_high_risk"] = total_risk > 0.6
+                result["message"] = f"⚠️ Vendor has {len(result['risk_factors'])} risk factor(s) (risk score: {result['confidence']:.2f})"
+                
+                if result["is_high_risk"]:
+                    logger.warning(f"🚨 HIGH RISK VENDOR: {vendor_name} (score: {result['confidence']:.2f})")
+            else:
+                logger.info(f"✅ Vendor risk check: {vendor_name} appears legitimate")
+        
+        except Exception as e:
+            logger.error(f"Vendor risk assessment error: {str(e)}")
+        
+        return result
+    
+    def _detect_pattern_fraud(self, invoice_data: Dict) -> Dict:
+        """Detect pattern-based fraud indicators"""
+        result = {
+            "suspicious_patterns": [],
+            "pattern_count": 0
+        }
+        
+        try:
+            # Split billing detection
+            total_amount = invoice_data.get("total_amount") or invoice_data.get("total")
+            if total_amount:
+                # Check for amounts just under approval thresholds
+                common_thresholds = [1000, 5000, 10000, 25000, 50000]
+                for threshold in common_thresholds:
+                    if threshold * 0.9 < total_amount < threshold:
+                        result["suspicious_patterns"].append({
+                            "pattern": "SPLIT_BILLING",
+                            "description": f"Amount ${total_amount:,.2f} is just below ${threshold:,.2f} threshold",
+                            "severity": "MEDIUM",
+                            "confidence": 0.6
+                        })
+            
+            # Check invoice date patterns
+            invoice_date = invoice_data.get("invoice_date") or invoice_data.get("date")
+            if invoice_date:
+                try:
+                    # Parse date
+                    if isinstance(invoice_date, str):
+                        date_obj = datetime.fromisoformat(invoice_date.replace('/', '-'))
+                    else:
+                        date_obj = invoice_date
+                    
+                    # Weekend transaction
+                    if date_obj.weekday() >= 5:  # Saturday or Sunday
+                        result["suspicious_patterns"].append({
+                            "pattern": "WEEKEND_TRANSACTION",
+                            "description": "Invoice dated on weekend",
+                            "severity": "LOW",
+                            "confidence": 0.4
+                        })
+                    
+                    # Holiday check (simplified - would need full holiday calendar)
+                    if date_obj.month == 12 and date_obj.day >= 24:
+                        result["suspicious_patterns"].append({
+                            "pattern": "HOLIDAY_TRANSACTION",
+                            "description": "Invoice dated during holiday period",
+                            "severity": "LOW",
+                            "confidence": 0.4
+                        })
+                except:
+                    pass
+            
+            # Check for missing invoice number
+            invoice_number = invoice_data.get("invoice_number") or invoice_data.get("invoiceNumber")
+            if not invoice_number or invoice_number in ["", "null", None]:
+                result["suspicious_patterns"].append({
+                    "pattern": "MISSING_INVOICE_NUMBER",
+                    "description": "Invoice number not provided",
+                    "severity": "MEDIUM",
+                    "confidence": 0.7
+                })
+            
+            # Check for sequential invoice numbers (could indicate forgery)
+            if invoice_number and len(self.invoice_cache) > 0:
+                recent_numbers = [inv.get("invoice_number") for inv in self.invoice_cache[-10:]]
+                if invoice_number in recent_numbers:
+                    result["suspicious_patterns"].append({
+                        "pattern": "DUPLICATE_INVOICE_NUMBER",
+                        "description": f"Invoice number {invoice_number} already exists",
+                        "severity": "HIGH",
+                        "confidence": 1.0
+                    })
+            
+            result["pattern_count"] = len(result["suspicious_patterns"])
+        
+        except Exception as e:
+            logger.error(f"Pattern fraud detection error: {str(e)}")
+        
+        return result
+    
+    def _analyze_line_items(self, invoice_data: Dict) -> Dict:
+        """Analyze line items for fraud indicators"""
+        result = {
+            "suspicious": False,
+            "confidence": 0.0,
+            "message": "",
+            "issues": []
+        }
+        
+        try:
+            line_items = invoice_data.get("line_items") or invoice_data.get("lineItems", [])
+            
+            if not line_items:
+                result["issues"].append("No line items provided")
+                result["suspicious"] = True
+                result["confidence"] = 0.5
+                result["message"] = "Missing line item details"
+                return result
+            
+            # Check for calculation errors
+            subtotal = invoice_data.get("subtotal")
+            if subtotal:
+                calculated_total = sum(
+                    item.get("amount", 0) 
+                    for item in line_items 
+                    if isinstance(item, dict)
+                )
+                
+                if abs(calculated_total - subtotal) > 0.02:  # Allow 2 cent difference
+                    result["suspicious"] = True
+                    result["confidence"] = 0.8
+                    result["issues"].append(f"Line items total ${calculated_total:,.2f} doesn't match subtotal ${subtotal:,.2f}")
+            
+            # Check for vague descriptions
+            vague_keywords = ["miscellaneous", "various", "other", "services", "expenses"]
+            for item in line_items:
+                if isinstance(item, dict):
+                    description = str(item.get("description", "")).lower()
+                    if any(keyword in description for keyword in vague_keywords):
+                        result["suspicious"] = True
+                        result["confidence"] = max(result["confidence"], 0.4)
+                        result["issues"].append(f"Vague line item description: '{item.get('description')}'")
+            
+            # Check for high-quantity low-value items
+            for item in line_items:
+                if isinstance(item, dict):
+                    quantity = item.get("quantity", 0)
+                    rate = item.get("rate") or item.get("unit_price", 0)
+                    if quantity > 100 and rate < 1:
+                        result["suspicious"] = True
+                        result["confidence"] = max(result["confidence"], 0.5)
+                        result["issues"].append(f"Unusual quantity/rate combination: {quantity} × ${rate}")
+            
+            if result["issues"]:
+                result["message"] = f"{len(result['issues'])} issue(s) found in line items"
+        
+        except Exception as e:
+            logger.error(f"Line item analysis error: {str(e)}")
+        
+        return result
+    
+    # Helper methods
+    
+    def _generate_invoice_hash(self, invoice_data: Dict) -> str:
+        """Generate hash for exact duplicate detection"""
+        # Use key fields for hashing
+        key_fields = {
+            "vendor": invoice_data.get("vendor_name") or invoice_data.get("vendorName", ""),
+            "invoice_number": invoice_data.get("invoice_number") or invoice_data.get("invoiceNumber", ""),
+            "amount": invoice_data.get("total_amount") or invoice_data.get("total", 0),
+            "date": invoice_data.get("invoice_date") or invoice_data.get("date", "")
+        }
+        hash_string = json.dumps(key_fields, sort_keys=True)
+        return hashlib.sha256(hash_string.encode()).hexdigest()
+    
+    def _calculate_text_similarity(self, invoice1: Dict, invoice2: Dict) -> float:
+        """Calculate text similarity using TF-IDF"""
+        if not SKLEARN_AVAILABLE:
+            return 0.0
+        
+        try:
+            # Combine relevant text fields
+            text1 = " ".join([
+                str(invoice1.get("vendor_name", "")),
+                str(invoice1.get("invoice_number", "")),
+                str(invoice1.get("total_amount", ""))
+            ])
+            
+            text2 = " ".join([
+                str(invoice2.get("vendor_name", "")),
+                str(invoice2.get("invoice_number", "")),
+                str(invoice2.get("total_amount", ""))
+            ])
+            
+            vectors = self.tfidf_vectorizer.fit_transform([text1, text2])
+            similarity = cosine_similarity(vectors[0:1], vectors[1:2])[0][0]
+            return float(similarity)
+        except:
+            return 0.0
+    
+    def _check_key_fields_match(self, invoice1: Dict, invoice2: Dict) -> bool:
+        """Check if key fields match between invoices"""
+        vendor1 = invoice1.get("vendor_name") or invoice1.get("vendorName", "")
+        vendor2 = invoice2.get("vendor_name") or invoice2.get("vendorName", "")
+        
+        amount1 = invoice1.get("total_amount") or invoice1.get("total", 0)
+        amount2 = invoice2.get("total_amount") or invoice2.get("total", 0)
+        
+        date1 = invoice1.get("invoice_date") or invoice1.get("date", "")
+        date2 = invoice2.get("invoice_date") or invoice2.get("date", "")
+        
+        return (
+            vendor1.lower() == vendor2.lower() and
+            abs(amount1 - amount2) < 0.01 and
+            date1 == date2
+        )
+    
+    # Old method removed - now using _get_vendor_amounts_from_db
+    
+    # Old method removed - now using MongoDB directly
+    
+    def _store_invoice(self, invoice_data: Dict, invoice_id: str = None):
+        """Store invoice in cache for future comparisons (MongoDB already has it)"""
+        try:
+            invoice_copy = {
+                "id": invoice_id,
+                "invoice_number": invoice_data.get("invoice_number") or invoice_data.get("invoiceNumber"),
+                "vendor_name": invoice_data.get("vendor_name") or invoice_data.get("vendorName"),
+                "total_amount": invoice_data.get("total_amount") or invoice_data.get("totalAmount"),
+                "date": invoice_data.get("invoice_date") or invoice_data.get("date"),
+                "hash": self._generate_invoice_hash(invoice_data),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            self.invoice_cache.append(invoice_copy)
+            
+            # Keep only last 100 invoices in cache (MongoDB has full history)
+            if len(self.invoice_cache) > 100:
+                self.invoice_cache = self.invoice_cache[-100:]
+            
+            logger.debug(f"✅ Invoice {invoice_id} added to cache (total: {len(self.invoice_cache)})")
+        except Exception as e:
+            logger.error(f"Error storing invoice in cache: {str(e)}")
+    
+    def _calculate_risk_score(self, analysis_results: Dict) -> float:
+        """Calculate overall risk score from analysis results"""
+        
+        # If duplicate detected, automatically set risk score to 100 (1.0)
+        if analysis_results.get("duplicate_detection", {}).get("is_duplicate", False):
+            return 1.0
+        
+        score = 0.0
+        
+        # High severity detections
+        high_severity = len([d for d in analysis_results["detections"] if d["severity"] == "HIGH"])
+        score += high_severity * 0.3
+        
+        # Medium severity detections
+        medium_severity = len([d for d in analysis_results["detections"] if d["severity"] == "MEDIUM"])
+        score += medium_severity * 0.15
+        
+        # Warnings
+        score += len(analysis_results["warnings"]) * 0.1
+        
+        # Fraud detected flag
+        if analysis_results["fraud_detected"]:
+            score += 0.4
+        
+        return min(score, 1.0)
+    
+    def _get_risk_level(self, risk_score: float) -> str:
+        """Convert risk score to risk level"""
+        if risk_score >= 0.7:
+            return "CRITICAL"
+        elif risk_score >= 0.5:
+            return "HIGH"
+        elif risk_score >= 0.3:
+            return "MEDIUM"
+        else:
+            return "LOW"
+    
+    def get_statistics(self) -> Dict:
+        """Get fraud detection statistics"""
+        return {
+            "total_invoices_analyzed": len(self.invoice_cache),
+            "unique_vendors": len(set(
+                inv.get("vendor_name", "").lower() 
+                for inv in self.invoice_cache 
+                if inv.get("vendor_name")
+            )),
+            "sklearn_available": SKLEARN_AVAILABLE
+        }
