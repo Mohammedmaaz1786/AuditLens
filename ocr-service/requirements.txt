@@ -16,6 +16,10 @@ spacy==3.8.7
 python-dateutil==2.9.0
 google-generativeai==0.8.3
 
+# Azure AI Services
+azure-ai-formrecognizer==3.3.0
+azure-core==1.29.5
+
 # Machine Learning (for fraud detection and analytics)
 scikit-learn==1.6.1
 pandas==2.2.3

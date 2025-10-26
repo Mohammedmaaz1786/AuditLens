@@ -208,7 +208,7 @@ export default function DashboardPage() {
         <Card className="card-hover border-l-4 border-l-blue-500 animate-fade-in">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">
-              Total Revenue
+              Amount Processed
             </CardTitle>
             <div className="h-8 w-8 rounded-full bg-blue-500/10 flex items-center justify-center">
               <DollarSign className="h-4 w-4 text-blue-500" />

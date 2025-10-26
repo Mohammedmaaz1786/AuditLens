@@ -1,6 +1,7 @@
 """Main document processor orchestrating OCR and entity extraction"""
 
 import io
+import os
 import time
 from typing import Dict, Optional
 import numpy as np
@@ -14,6 +15,7 @@ from app.services.image_preprocessor import ImagePreprocessor
 from app.services.entity_extractor import EntityExtractor
 from app.services.ai_extractor import AIExtractor
 from app.services.fraud_detector import FraudDetector
+from app.services.azure_ocr import get_azure_ocr_service
 from app.models.schemas import InvoiceData, ProcessingResult, ProcessingMetadata, LineItem
 from app.config import settings
 
@@ -26,6 +28,34 @@ class DocumentProcessor:
         self.extractor = EntityExtractor()
         self.ai_extractor = AIExtractor()
         self.fraud_detector = FraudDetector()
+        
+        # Get OCR provider from settings (reads from .env)
+        self.ocr_provider = settings.OCR_PROVIDER.lower() if settings.OCR_PROVIDER else 'tesseract'
+        self.primary_provider = self.ocr_provider  # Store primary choice
+        
+        # Initialize Azure OCR if configured
+        self.azure_ocr = None
+        if self.ocr_provider == 'azure':
+            try:
+                self.azure_ocr = get_azure_ocr_service()
+                if self.azure_ocr:
+                    logger.info(f"🤖 OCR Provider: AZURE Document Intelligence (Primary)")
+                    logger.info(f"   Fallback Chain: Azure → Gemini → Tesseract")
+                else:
+                    logger.warning("⚠️  Azure credentials not configured")
+                    logger.info("   Falling back to: Gemini AI → Tesseract")
+                    self.ocr_provider = 'gemini'
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize Azure OCR: {str(e)}")
+                logger.info("   Falling back to: Gemini AI → Tesseract")
+                self.azure_ocr = None
+                self.ocr_provider = 'gemini'
+        
+        if self.ocr_provider == 'gemini':
+            logger.info(f"🤖 OCR Provider: GOOGLE Gemini AI (Primary)")
+            logger.info(f"   Fallback: Gemini → Tesseract")
+        elif self.ocr_provider == 'tesseract':
+            logger.info(f"🤖 OCR Provider: TESSERACT (Open Source)")
         
         # Configure Tesseract if custom path provided
         if settings.TESSERACT_CMD:
@@ -51,49 +81,58 @@ class DocumentProcessor:
         start_time = time.time()
         
         try:
-            logger.info(f"Starting processing for {filename}")
+            logger.info(f"🔍 Starting processing for {filename}")
             
             # Detect file type
             file_type = self._get_file_type(filename)
             file_size = len(file_content)
             
-            # Convert to images
-            images = await self._file_to_images(file_content, file_type)
+            # Try OCR with fallback chain: Azure → Gemini → Tesseract
+            invoice_data = None
+            overall_confidence = 0.0
+            combined_text = ""
             
-            if not images:
-                raise ValueError("Could not convert document to images")
+            # Try Azure first (if configured)
+            if self.ocr_provider == 'azure' and self.azure_ocr:
+                try:
+                    logger.info(f"📄 Attempting Azure Document Intelligence for {filename}")
+                    invoice_data, overall_confidence, combined_text = await self._process_with_azure(
+                        file_content, filename
+                    )
+                    logger.info(f"✅ Azure processing successful - Confidence: {overall_confidence:.2%}")
+                except Exception as e:
+                    logger.error(f"❌ Azure OCR failed: {str(e)}")
+                    logger.info(f"   Falling back to Gemini AI...")
+                    invoice_data = None
             
-            logger.info(f"Converted to {len(images)} page(s)")
-            
-            # Process each page
-            all_text = []
-            all_data = []
-            
-            for i, image in enumerate(images):
-                logger.info(f"Processing page {i+1}/{len(images)}")
-                
-                # Preprocess image
-                processed_image = self.preprocessor.preprocess(image)
-                
-                # Perform OCR
-                text, confidence = self._perform_ocr(processed_image, language)
-                all_text.append(text)
-                
-                logger.info(f"Page {i+1} OCR confidence: {confidence:.2f}")
-            
-            # Combine text from all pages
-            combined_text = "\n\n=== PAGE BREAK ===\n\n".join(all_text)
-            
-            # Use AI to extract structured data from the combined text
-            logger.info("Using AI extraction for structured data...")
-            ai_extracted_data = self.ai_extractor.extract_invoice_data(combined_text)
-            
-            # Build invoice data from AI extraction
-            invoice_data = self._build_invoice_data_from_ai(ai_extracted_data, combined_text)
-            
-            # Calculate overall confidence from AI confidence scores
-            confidence_scores = ai_extracted_data.get('confidence', {})
-            overall_confidence = self._calculate_ai_confidence(confidence_scores)
+            # Fallback to Gemini/Tesseract if Azure failed or not configured
+            if invoice_data is None:
+                try:
+                    provider_name = 'Gemini AI' if self.ocr_provider == 'gemini' else 'Tesseract'
+                    logger.info(f"📄 Using {provider_name} OCR for {filename}")
+                    invoice_data, overall_confidence, combined_text = await self._process_with_traditional_ocr(
+                        file_content, filename, file_type, language
+                    )
+                    logger.info(f"✅ {provider_name} processing successful - Confidence: {overall_confidence:.2%}")
+                except Exception as gemini_error:
+                    if self.ocr_provider == 'gemini':
+                        # If Gemini fails, try Tesseract as last resort
+                        logger.error(f"❌ Gemini AI failed: {str(gemini_error)}")
+                        logger.info(f"   Falling back to Tesseract OCR (last resort)...")
+                        try:
+                            # Force Tesseract mode temporarily
+                            original_provider = self.ocr_provider
+                            self.ocr_provider = 'tesseract'
+                            invoice_data, overall_confidence, combined_text = await self._process_with_traditional_ocr(
+                                file_content, filename, file_type, language
+                            )
+                            self.ocr_provider = original_provider
+                            logger.info(f"✅ Tesseract processing successful (fallback)")
+                        except Exception as tesseract_error:
+                            logger.error(f"❌ All OCR methods failed!")
+                            raise Exception(f"OCR processing failed: Azure, Gemini, and Tesseract all failed")
+                    else:
+                        raise
             
             # Processing metadata
             processing_time = time.time() - start_time
@@ -114,8 +153,8 @@ class DocumentProcessor:
                 invoice_id=invoice_data.invoice_number
             )
             
-            logger.info(f"Processing completed in {processing_time:.2f}s with confidence {overall_confidence:.2f}")
-            logger.info(f"Fraud Risk Level: {fraud_analysis['risk_level']} (Score: {fraud_analysis['risk_score']:.2f})")
+            logger.info(f"✅ Processing completed in {processing_time:.2f}s with confidence {overall_confidence:.2f}")
+            logger.info(f"🛡️  Fraud Risk Level: {fraud_analysis['risk_level']} (Score: {fraud_analysis['risk_score']:.2f})")
             
             return ProcessingResult(
                 success=True,
@@ -545,3 +584,181 @@ class DocumentProcessor:
                 total_weight += weight
         
         return weighted_sum / total_weight if total_weight > 0 else 0.5
+    
+    async def _process_with_azure(
+        self,
+        file_content: bytes,
+        filename: str
+    ) -> tuple:
+        """
+        Process document using Azure Document Intelligence
+        
+        Returns:
+            Tuple of (invoice_data, confidence, raw_text)
+        """
+        import tempfile
+        
+        # Save file temporarily for Azure processing
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as tmp_file:
+            tmp_file.write(file_content)
+            tmp_path = tmp_file.name
+        
+        try:
+            # Use Azure OCR to extract invoice data
+            logger.info("🔍 Analyzing document with Azure Document Intelligence...")
+            extracted_data = self.azure_ocr.analyze_invoice(tmp_path)
+            
+            # Build invoice data from Azure extraction
+            invoice_data = self._build_invoice_data_from_azure(extracted_data)
+            
+            # Get confidence from Azure
+            overall_confidence = extracted_data.get('confidence', 0.85)
+            
+            # Get raw text
+            combined_text = extracted_data.get('raw_text', '')
+            
+            logger.info(f"✅ Azure extraction complete - Confidence: {overall_confidence:.2%}")
+            
+            return invoice_data, overall_confidence, combined_text
+            
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file: {e}")
+    
+    async def _process_with_traditional_ocr(
+        self,
+        file_content: bytes,
+        filename: str,
+        file_type: str,
+        language: str
+    ) -> tuple:
+        """
+        Process document using Tesseract OCR + Gemini AI
+        
+        Returns:
+            Tuple of (invoice_data, confidence, raw_text)
+        """
+        # Convert to images
+        images = await self._file_to_images(file_content, file_type)
+        
+        if not images:
+            raise ValueError("Could not convert document to images")
+        
+        logger.info(f"📄 Converted to {len(images)} page(s)")
+        
+        # Process each page
+        all_text = []
+        
+        for i, image in enumerate(images):
+            logger.info(f"🔍 Processing page {i+1}/{len(images)}")
+            
+            # Preprocess image
+            processed_image = self.preprocessor.preprocess(image)
+            
+            # Perform OCR
+            text, confidence = self._perform_ocr(processed_image, language)
+            all_text.append(text)
+            
+            logger.info(f"   Page {i+1} OCR confidence: {confidence:.2f}")
+        
+        # Combine text from all pages
+        combined_text = "\n\n=== PAGE BREAK ===\n\n".join(all_text)
+        
+        # Use AI to extract structured data from the combined text
+        logger.info("🤖 Using AI extraction for structured data...")
+        ai_extracted_data = self.ai_extractor.extract_invoice_data(combined_text)
+        
+        # Build invoice data from AI extraction
+        invoice_data = self._build_invoice_data_from_ai(ai_extracted_data, combined_text)
+        
+        # Calculate overall confidence from AI confidence scores
+        confidence_scores = ai_extracted_data.get('confidence', {})
+        overall_confidence = self._calculate_ai_confidence(confidence_scores)
+        
+        return invoice_data, overall_confidence, combined_text
+    
+    def _build_invoice_data_from_azure(self, azure_data: Dict) -> InvoiceData:
+        """Build InvoiceData from Azure Document Intelligence extraction"""
+        
+        vendor = azure_data.get('vendor', {})
+        customer = azure_data.get('customer', {})
+        
+        # Extract line items
+        line_items = []
+        for item in azure_data.get('lineItems', []):
+            line_items.append(LineItem(
+                description=item.get('description', ''),
+                quantity=item.get('quantity', 1.0),
+                unit_price=item.get('unitPrice', 0.0),
+                amount=item.get('amount', 0.0),
+                product_code=item.get('productCode')
+            ))
+        
+        # Detect and convert currency (INR → USD if needed)
+        currency = azure_data.get('currency', 'USD')
+        subtotal = azure_data.get('subtotal', 0.0)
+        tax = azure_data.get('tax', 0.0)
+        total = azure_data.get('total', 0.0)
+        
+        # Check if currency conversion is needed
+        detected_currency = currency.upper() if currency else 'USD'
+        raw_text = azure_data.get('raw_text', '')
+        
+        # INR to USD conversion
+        if detected_currency == 'INR' or 'INR' in raw_text or '₹' in raw_text or 'rupee' in raw_text.lower():
+            INR_TO_USD = 0.012  # 1 INR = ~0.012 USD
+            logger.info(f"💱 Currency Conversion Detected: INR → USD")
+            logger.info(f"   Original amounts: Subtotal={subtotal} INR, Tax={tax} INR, Total={total} INR")
+            
+            # Convert all amounts
+            subtotal = subtotal * INR_TO_USD if subtotal else 0.0
+            tax = tax * INR_TO_USD if tax else 0.0
+            total = total * INR_TO_USD if total else 0.0
+            
+            # Convert line items
+            for item in line_items:
+                item.unit_price = item.unit_price * INR_TO_USD if item.unit_price else 0.0
+                item.amount = item.amount * INR_TO_USD if item.amount else 0.0
+            
+            currency = 'USD'
+            logger.info(f"   Converted amounts: Subtotal=${subtotal:.2f}, Tax=${tax:.2f}, Total=${total:.2f}")
+        
+        # Build confidence scores
+        confidence_scores = {
+            'invoiceNumber': azure_data.get('confidence', 0.85),
+            'vendorName': azure_data.get('confidence', 0.85),
+            'date': azure_data.get('confidence', 0.85),
+            'total': azure_data.get('confidence', 0.85),
+            'lineItems': azure_data.get('confidence', 0.85)
+        }
+        
+        return InvoiceData(
+            vendor_name=vendor.get('name'),
+            vendor_address=vendor.get('address'),
+            vendor_tax_id=vendor.get('taxId'),
+            vendor_email=vendor.get('email'),
+            vendor_phone=vendor.get('phone'),
+            customer_name=customer.get('name'),
+            customer_address=customer.get('address'),
+            customer_email=None,
+            customer_phone=None,
+            ship_to_name=None,
+            ship_to_address=None,
+            invoice_number=azure_data.get('invoiceNumber'),
+            invoice_date=azure_data.get('invoiceDate'),
+            due_date=azure_data.get('dueDate'),
+            subtotal=subtotal,
+            tax=tax,
+            total_amount=total,
+            amount_paid=0.0,
+            balance_due=total,
+            currency=currency,
+            line_items=line_items,
+            payment_instructions=azure_data.get('paymentTerms'),
+            notes=azure_data.get('notes'),
+            confidence_scores=confidence_scores,
+            raw_text=raw_text
+        )

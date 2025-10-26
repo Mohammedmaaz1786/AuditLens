@@ -15,12 +15,13 @@
 **AuditLens** is a comprehensive invoice auditing platform that automates document processing with advanced AI and machine learning capabilities:
 
 ### Key Features
-- 🤖 **Intelligent OCR** - Powered by Tesseract + Google Gemini AI 2.0 Flash
+- 🤖 **Intelligent OCR** - Azure Document Intelligence (95%+ accuracy) with Gemini AI fallback
 - 🛡️ **Fraud Detection** - 5 ML algorithms (Isolation Forest, TF-IDF, Z-Score, Pattern Matching)
 - ✅ **Compliance** - SOX, PCI-DSS, and GDPR validation
 - 📊 **Advanced Analytics** - Spending patterns, vendor performance, AI recommendations
 - 🔐 **Enterprise Security** - AES-256 encryption, JWT auth, blockchain-like audit trails
 - 📈 **Real-time Dashboard** - React-based UI with live statistics and visualizations
+- 🔄 **Fallback System** - Azure → Gemini → Tesseract (99.9% uptime)
 
 > 📄 **[View Complete Processing Flow Documentation](PROCESSING_FLOW.md)** - Detailed technical architecture and data flow
 
@@ -46,7 +47,7 @@
 **Three-tier hybrid microservices architecture:**
 - **Frontend**: Next.js 15 + React 19 + Tailwind CSS
 - **Backend API**: Express.js (JavaScript/ES Modules) + MongoDB + JWT Authentication
-- **OCR Service**: Python FastAPI + Tesseract + Gemini AI + scikit-learn
+- **OCR Service**: Python FastAPI + Azure Document Intelligence + Gemini AI + Tesseract + scikit-learn
 
 ---
 

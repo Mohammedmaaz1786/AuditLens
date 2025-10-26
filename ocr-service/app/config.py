@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     # Gemini AI Settings
     GEMINI_API_KEY: str = None  # Gemini AI API key for AI extraction
     
+    # Azure Document Intelligence Settings
+    AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: str = None  # Azure Document Intelligence endpoint
+    AZURE_DOCUMENT_INTELLIGENCE_KEY: str = None  # Azure Document Intelligence API key
+    
+    # OCR Provider: 'azure', 'gemini', or 'tesseract'
+    OCR_PROVIDER: str = "tesseract"
+    
     # Security & Encryption Settings
     ENCRYPTION_MASTER_KEY: str = None  # Fernet encryption key
     AUDIT_SECRET: str = None  # Secret for audit log signatures

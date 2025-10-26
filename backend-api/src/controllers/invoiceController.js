@@ -157,8 +157,11 @@ export const processInvoice = async (req, res) => {
       status: 'pending',
     });
 
-    vendor.totalInvoices += 1;
-    vendor.totalAmount += extractedData.total_amount;
+    // Only update vendor totals if invoice is not rejected
+    if (invoice.status !== 'rejected') {
+      vendor.totalInvoices += 1;
+      vendor.totalAmount += extractedData.total_amount;
+    }
     if (processedFraudAnalysis) {
       vendor.riskScore = processedFraudAnalysis.overallScore;
     }
@@ -285,8 +288,11 @@ export const createInvoice = async (req, res) => {
       uploadedBy: req.user?.id,
     });
 
-    vendor.totalInvoices += 1;
-    vendor.totalAmount += invoice.totalAmount;
+    // Only update vendor totals if invoice is not rejected
+    if (invoice.status !== 'rejected') {
+      vendor.totalInvoices += 1;
+      vendor.totalAmount += invoice.totalAmount;
+    }
     if (processedFraudAnalysis?.overallScore) {
       vendor.riskScore = processedFraudAnalysis.overallScore;
     }
@@ -446,7 +452,11 @@ export const rejectInvoice = async (req, res) => {
 
 export const getInvoiceStats = async (_req, res) => {
   try {
+    // Exclude rejected invoices from overall stats
     const stats = await Invoice.aggregate([
+      {
+        $match: { status: { $ne: 'rejected' } }
+      },
       {
         $group: {
           _id: null,
@@ -469,4 +479,4 @@ export const getInvoiceStats = async (_req, res) => {
     logger.error('Get invoice stats error:', error);
     res.status(500).json({ success: false, message: error.message || 'Server error' });
   }
-};
+};

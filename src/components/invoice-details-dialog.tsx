@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import {
   Dialog,
   DialogContent,
@@ -13,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { CheckCircle, XCircle, AlertTriangle, Loader2 } from "lucide-react";
+import { CheckCircle, XCircle, AlertTriangle, Loader2, ExternalLink } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 
@@ -35,6 +36,37 @@ export function InvoiceDetailsDialog({
   const [isApproving, setIsApproving] = useState(false);
   const [isRejecting, setIsRejecting] = useState(false);
   const { toast } = useToast();
+  const router = useRouter();
+
+  const handleViewVendor = async () => {
+    try {
+      // Get vendor by name
+      const response = await apiClient.getVendors({ page: 1, limit: 1000 });
+      if (response.success && response.data?.vendors) {
+        const vendor = response.data.vendors.find(
+          (v: any) => v.name.toLowerCase() === invoice.vendorName.toLowerCase()
+        );
+        
+        if (vendor) {
+          // Close dialog and navigate to vendors page with vendor highlighted
+          onOpenChange(false);
+          router.push(`/vendors?highlight=${vendor._id}`);
+        } else {
+          toast({
+            title: "Vendor Not Found",
+            description: "Could not find the vendor in the system",
+            variant: "destructive",
+          });
+        }
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to navigate to vendor",
+        variant: "destructive",
+      });
+    }
+  };
 
   const handleApprove = async () => {
     try {
@@ -190,8 +222,17 @@ export function InvoiceDetailsDialog({
 
           {/* Vendor Information */}
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
               <CardTitle>Vendor Information</CardTitle>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleViewVendor}
+                className="gap-2"
+              >
+                <ExternalLink className="h-4 w-4" />
+                View Vendor
+              </Button>
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-4">
               <div>

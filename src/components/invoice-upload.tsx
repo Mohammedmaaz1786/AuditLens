@@ -100,6 +100,18 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
   const [isConfirmingSave, setIsConfirmingSave] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Format currency with proper US locale
+  const formatCurrency = (amount: number | undefined, currency = 'USD'): string => {
+    if (amount === undefined || amount === null || isNaN(amount)) return 'N/A';
+    
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  };
+
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
@@ -231,7 +243,7 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
     }
   }
 
-  async function handleConfirmSave() {
+  async function handleConfirmSave(status: 'pending' | 'flagged' | 'rejected' = 'pending') {
     if (!ocrResult) return;
 
     setIsConfirmingSave(true);
@@ -245,6 +257,20 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
         invoiceNumber: ocrResult.invoiceNumber,
         vendorName: ocrResult.vendorName,
         vendorEmail: ocrResult.vendorEmail || undefined,
+        vendorPhone: ocrResult.vendorPhone || undefined,
+        vendorAddress: ocrResult.vendorAddress || undefined,
+        // Receiver Information
+        billToName: ocrResult.billToName || undefined,
+        billToAddress: ocrResult.billToAddress || undefined,
+        billToEmail: ocrResult.billToEmail || undefined,
+        billToPhone: ocrResult.billToPhone || undefined,
+        billToCompany: ocrResult.billToCompany || undefined,
+        customerName: ocrResult.customerName || undefined,
+        customerAddress: ocrResult.customerAddress || undefined,
+        customerEmail: ocrResult.customerEmail || undefined,
+        customerPhone: ocrResult.customerPhone || undefined,
+        shipToName: ocrResult.shipToName || undefined,
+        shipToAddress: ocrResult.shipToAddress || undefined,
         totalAmount: ocrResult.totalAmount,
         taxAmount: ocrResult.taxAmount,
         subtotal: ocrResult.subtotal,
@@ -255,7 +281,7 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
         ocrConfidence: ocrResult.ocrConfidence,
         rawText: ocrResult.rawText,
         fraudAnalysis: fraudAnalysis || undefined,
-        status: 'pending'
+        status: status  // Use the status parameter (pending or flagged)
       };
 
       console.log('=== INVOICE PAYLOAD TO BACKEND ===');
@@ -474,7 +500,7 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
                     </div>
                     <div>
                       <span className="text-muted-foreground">Total Amount:</span>
-                      <p className="font-medium">${ocrResult.totalAmount.toLocaleString()}</p>
+                      <p className="font-medium">{formatCurrency(ocrResult.totalAmount, ocrResult.currency)}</p>
                     </div>
                     <div>
                       <span className="text-muted-foreground">Invoice Date:</span>
@@ -587,16 +613,16 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
                   <div className="space-y-1">
                     <span className="text-muted-foreground">Total Amount:</span>
                     <p className="font-semibold text-lg text-green-600">
-                      {ocrResult?.currency} ${ocrResult?.totalAmount.toLocaleString()}
+                      {formatCurrency(ocrResult?.totalAmount, ocrResult?.currency)}
                     </p>
                   </div>
                   <div className="space-y-1">
                     <span className="text-muted-foreground">Subtotal:</span>
-                    <p className="font-medium">${ocrResult?.subtotal.toLocaleString()}</p>
+                    <p className="font-medium">{formatCurrency(ocrResult?.subtotal, ocrResult?.currency)}</p>
                   </div>
                   <div className="space-y-1">
                     <span className="text-muted-foreground">Tax Amount:</span>
-                    <p className="font-medium">${ocrResult?.taxAmount.toLocaleString()}</p>
+                    <p className="font-medium">{formatCurrency(ocrResult?.taxAmount, ocrResult?.currency)}</p>
                   </div>
                   <div className="space-y-1">
                     <span className="text-muted-foreground">Currency:</span>
@@ -790,20 +816,52 @@ export function InvoiceUpload({ onUploadSuccess }: { onUploadSuccess?: () => voi
             )}
           </div>
 
-          <DialogFooter className="gap-2">
-            <Button 
-              variant="outline" 
-              onClick={handleCancelPreview}
-              disabled={isConfirmingSave}
-            >
-              Cancel
-            </Button>
-            <Button 
-              onClick={handleConfirmSave}
-              disabled={isConfirmingSave}
-            >
-              {isConfirmingSave ? 'Saving...' : 'Confirm & Save to Database'}
-            </Button>
+          <DialogFooter className="gap-2 flex-col sm:flex-row">
+            <div className="flex gap-2 w-full sm:w-auto">
+              <Button 
+                variant="outline" 
+                onClick={handleCancelPreview}
+                disabled={isConfirmingSave}
+                className="flex-1 sm:flex-initial"
+              >
+                Cancel
+              </Button>
+            </div>
+            <div className="flex gap-2 w-full sm:w-auto sm:ml-auto">
+              {fraudAnalysis && fraudAnalysis.risk_level === 'CRITICAL' && (
+                <Button 
+                  variant="destructive"
+                  onClick={async () => {
+                    // Save with 'rejected' status for analytics
+                    await handleConfirmSave('rejected');
+                  }}
+                  disabled={isConfirmingSave}
+                  className="flex-1 sm:flex-initial"
+                >
+                  {isConfirmingSave ? 'Rejecting...' : 'Reject'}
+                </Button>
+              )}
+              {fraudAnalysis && ['HIGH', 'MEDIUM'].includes(fraudAnalysis.risk_level) && (
+                <Button 
+                  variant="secondary"
+                  onClick={async () => {
+                    // Save with 'flagged' status instead of 'pending'
+                    await handleConfirmSave('flagged');
+                  }}
+                  disabled={isConfirmingSave}
+                  className="flex-1 sm:flex-initial"
+                >
+                  Flag for Review
+                </Button>
+              )}
+              <Button 
+                onClick={() => handleConfirmSave('pending')}
+                disabled={isConfirmingSave}
+                className="flex-1 sm:flex-initial"
+              >
+                {isConfirmingSave ? 'Saving...' : 'Save to Database'}
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

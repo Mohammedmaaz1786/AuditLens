@@ -55,3 +55,7 @@ ENV/
 ocr-service/uploads/*
 ocr-service/logs/*
 
+# Documentation (exclude all .md files except README.md and PROCESSING_FLOW.md)
+*.md
+!README.md
+!PROCESSING_FLOW.md

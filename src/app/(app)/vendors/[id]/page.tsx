@@ -182,7 +182,12 @@ export default function VendorDetailsPage() {
             <FileText className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{vendor.totalInvoices || 0}</div>
+            <div className="text-2xl font-bold">
+              {invoices.filter(inv => inv.status !== 'rejected').length}
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              {invoices.length} total ({invoices.filter(inv => inv.status === 'rejected').length} rejected)
+            </p>
           </CardContent>
         </Card>
 
@@ -196,8 +201,15 @@ export default function VendorDetailsPage() {
               {new Intl.NumberFormat("en-US", {
                 style: "currency",
                 currency: "USD",
-              }).format(vendor.totalAmount || 0)}
+              }).format(
+                invoices
+                  .filter(inv => inv.status !== 'rejected')
+                  .reduce((sum, inv) => sum + (inv.totalAmount || 0), 0)
+              )}
             </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Excluding rejected invoices
+            </p>
           </CardContent>
         </Card>
 

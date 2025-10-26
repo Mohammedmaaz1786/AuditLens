@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { DataTable } from "@/components/data-table";
 import { columns } from "./columns";
 import { Button } from "@/components/ui/button";
@@ -47,7 +48,10 @@ interface Invoice {
   };
 }
 
-export default function VendorsPage() {
+function VendorsContent() {
+  const searchParams = useSearchParams();
+  const highlightId = searchParams.get('highlight');
+  
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +81,16 @@ export default function VendorsPage() {
       if (response.success && response.data) {
         setVendors(response.data.vendors);
         setError(null);
+        
+        // Auto-open vendor if highlight parameter is present
+        if (highlightId) {
+          const vendorToHighlight = response.data.vendors.find((v: Vendor) => v._id === highlightId);
+          if (vendorToHighlight) {
+            // Open vendor details dialog
+            setSelectedVendor(vendorToHighlight);
+            fetchVendorInvoices(vendorToHighlight.name);
+          }
+        }
       } else {
         setError("Failed to load vendors");
       }
@@ -100,10 +114,16 @@ export default function VendorsPage() {
 
       if (response.ok) {
         const data = await response.json();
-        setVendorInvoices(data.invoices || []);
+        // Backend returns { success: true, data: { invoices: [...], pagination: {...} } }
+        setVendorInvoices(data.data?.invoices || []);
+        console.log(`✓ Fetched ${data.data?.invoices?.length || 0} invoices for vendor: ${vendorName}`);
+      } else {
+        console.error('Failed to fetch vendor invoices:', response.status, response.statusText);
+        setVendorInvoices([]);
       }
     } catch (error) {
       console.error('Failed to fetch vendor invoices:', error);
+      setVendorInvoices([]);
     } finally {
       setLoadingInvoices(false);
     }
@@ -535,5 +555,17 @@ export default function VendorsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+export default function VendorsPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex h-full items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    }>
+      <VendorsContent />
+    </Suspense>
   );
 }

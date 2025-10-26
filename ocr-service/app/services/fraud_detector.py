@@ -146,7 +146,7 @@ class FraudDetector:
             if duplicate_result["is_duplicate"]:
                 results["detections"].append({
                     "type": "DUPLICATE_INVOICE",
-                    "severity": "HIGH",
+                    "severity": "CRITICAL",  # Changed from HIGH to CRITICAL
                     "description": duplicate_result["message"],
                     "confidence": duplicate_result["confidence"]
                 })
@@ -169,9 +169,19 @@ class FraudDetector:
             # 3. Vendor Risk Assessment
             vendor_risk = self._assess_vendor_risk(invoice_data)
             if vendor_risk["is_high_risk"]:
+                # Determine severity based on risk factors
+                severity = "MEDIUM"
+                has_blocked_vendor = any(f["factor"] == "BLOCKED_VENDOR" for f in vendor_risk.get("risk_factors", []))
+                has_inactive_vendor = any(f["factor"] == "INACTIVE_VENDOR" for f in vendor_risk.get("risk_factors", []))
+                
+                if has_blocked_vendor:
+                    severity = "CRITICAL"
+                elif has_inactive_vendor:
+                    severity = "HIGH"
+                
                 results["warnings"].append({
                     "type": "VENDOR_RISK",
-                    "severity": "MEDIUM",
+                    "severity": severity,
                     "description": vendor_risk["message"],
                     "confidence": vendor_risk["confidence"]
                 })
@@ -467,23 +477,84 @@ class FraudDetector:
             if not vendor_name:
                 return result
             
-            # Check if new vendor (from MongoDB)
+            # Check vendor status from vendors collection
+            vendor_status = None
+            vendor_blocked = False
+            vendor_inactive = False
+            
+            if self.db is not None:
+                try:
+                    vendors_collection = self.db.vendors
+                    vendor_record = vendors_collection.find_one({"name": vendor_name})
+                    
+                    if vendor_record:
+                        vendor_status = vendor_record.get("status", "active")
+                        
+                        # CRITICAL: Check if vendor is blocked
+                        if vendor_status == "blocked":
+                            vendor_blocked = True
+                            result["risk_factors"].append({
+                                "factor": "BLOCKED_VENDOR",
+                                "description": "🚨 CRITICAL: This vendor has been BLOCKED in the system",
+                                "risk_contribution": 1.0  # Maximum risk!
+                            })
+                            result["is_high_risk"] = True
+                            logger.error(f"🚨 BLOCKED VENDOR attempting transaction: {vendor_name}")
+                        
+                        # HIGH: Check if vendor is inactive
+                        elif vendor_status == "inactive":
+                            vendor_inactive = True
+                            result["risk_factors"].append({
+                                "factor": "INACTIVE_VENDOR",
+                                "description": "⚠️ WARNING: This vendor is marked as INACTIVE in the system",
+                                "risk_contribution": 0.7  # High risk
+                            })
+                            result["is_high_risk"] = True
+                            logger.warning(f"⚠️ INACTIVE VENDOR attempting transaction: {vendor_name}")
+                    
+                except Exception as e:
+                    logger.warning(f"Could not check vendor status: {str(e)}")
+            
+            # Check if new vendor (check both vendors collection and invoices)
             vendor_invoice_count = 0
+            vendor_exists_in_db = False
+            
+            if self.db is not None:
+                try:
+                    vendors_collection = self.db.vendors
+                    vendor_record = vendors_collection.find_one({"name": vendor_name})
+                    if vendor_record:
+                        vendor_exists_in_db = True
+                        logger.info(f"✓ Vendor exists in database: {vendor_name}")
+                except Exception as e:
+                    logger.warning(f"Could not check if vendor exists: {str(e)}")
+            
             if self.invoices_collection is not None:
                 vendor_invoice_count = self.invoices_collection.count_documents({"vendorName": vendor_name})
             else:
                 # Fallback to cache
                 vendor_invoice_count = sum(1 for inv in self.invoice_cache if inv.get("vendor_name") == vendor_name)
             
-            is_new_vendor = vendor_invoice_count == 0
+            # Vendor is "new" if it doesn't exist in vendors DB OR has no previous invoices
+            is_new_vendor = not vendor_exists_in_db or vendor_invoice_count == 0
             
             if is_new_vendor:
+                if not vendor_exists_in_db:
+                    description = "🚨 NEW VENDOR: This vendor is not registered in the system - requires additional verification"
+                    risk_contribution = 0.6  # Higher risk for completely new vendor
+                else:
+                    description = "⚠️ First transaction with this vendor - requires additional verification"
+                    risk_contribution = 0.4  # Lower risk if vendor exists but no invoices yet
+                
                 result["risk_factors"].append({
                     "factor": "NEW_VENDOR",
-                    "description": "⚠️ First transaction with this vendor",
-                    "risk_contribution": 0.3
+                    "description": description,
+                    "risk_contribution": risk_contribution
                 })
-                logger.info(f"⚠️ NEW VENDOR DETECTED: {vendor_name}")
+                result["is_high_risk"] = True  # Mark new vendors as requiring review
+                logger.warning(f"🚨 NEW VENDOR DETECTED: {vendor_name} (exists_in_db: {vendor_exists_in_db}, invoice_count: {vendor_invoice_count})")
+            else:
+                logger.info(f"✓ Established vendor: {vendor_name} (invoice_count: {vendor_invoice_count})")
             
             # Check vendor address
             vendor_address = invoice_data.get("vendor_address") or invoice_data.get("vendorAddress")
@@ -647,7 +718,15 @@ class FraudDetector:
                 total_risk = sum(factor["risk_contribution"] for factor in result["risk_factors"])
                 result["confidence"] = min(total_risk, 1.0)
                 result["is_high_risk"] = total_risk > 0.6
-                result["message"] = f"⚠️ Vendor has {len(result['risk_factors'])} risk factor(s) (risk score: {result['confidence']:.2f})"
+                
+                # Build detailed message with specific risk factors
+                high_risk_factors = [f for f in result["risk_factors"] if f["risk_contribution"] >= 0.7]
+                if high_risk_factors:
+                    # Show the most critical factor in the message
+                    critical_factor = high_risk_factors[0]
+                    result["message"] = critical_factor["description"]
+                else:
+                    result["message"] = f"⚠️ Vendor has {len(result['risk_factors'])} risk factor(s) (risk score: {result['confidence']:.2f})"
                 
                 if result["is_high_risk"]:
                     logger.warning(f"🚨 HIGH RISK VENDOR: {vendor_name} (score: {result['confidence']:.2f})")
@@ -721,16 +800,8 @@ class FraudDetector:
                     "confidence": 0.7
                 })
             
-            # Check for sequential invoice numbers (could indicate forgery)
-            if invoice_number and len(self.invoice_cache) > 0:
-                recent_numbers = [inv.get("invoice_number") for inv in self.invoice_cache[-10:]]
-                if invoice_number in recent_numbers:
-                    result["suspicious_patterns"].append({
-                        "pattern": "DUPLICATE_INVOICE_NUMBER",
-                        "description": f"Invoice number {invoice_number} already exists",
-                        "severity": "HIGH",
-                        "confidence": 1.0
-                    })
+            # Note: Duplicate invoice number check is handled by _detect_duplicates() method
+            # No need to check here to avoid duplicate warnings
             
             result["pattern_count"] = len(result["suspicious_patterns"])
         
@@ -886,8 +957,10 @@ class FraudDetector:
     def _calculate_risk_score(self, analysis_results: Dict) -> float:
         """Calculate overall risk score from analysis results"""
         
-        # If duplicate detected, automatically set risk score to 100 (1.0)
-        if analysis_results.get("duplicate_detection", {}).get("is_duplicate", False):
+        # If duplicate detected, automatically set risk score to 100 (1.0) - CRITICAL
+        duplicate_check = analysis_results.get("details", {}).get("duplicate_check", {})
+        if duplicate_check.get("is_duplicate", False):
+            logger.warning(f"🚨 DUPLICATE INVOICE - Setting risk score to 100% (CRITICAL)")
             return 1.0
         
         score = 0.0

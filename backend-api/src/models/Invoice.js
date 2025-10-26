@@ -31,7 +31,7 @@ const InvoiceSchema = new mongoose.Schema(
     taxAmount: { type: Number, min: 0 },
     subtotal: { type: Number, min: 0 },
     currency: { type: String, default: 'USD', uppercase: true },
-    status: { type: String, enum: ['pending', 'approved', 'rejected', 'paid', 'overdue'], default: 'pending', index: true },
+    status: { type: String, enum: ['pending', 'approved', 'rejected', 'paid', 'overdue', 'flagged'], default: 'pending', index: true },
     lineItems: [LineItemSchema],
     notes: { type: String, trim: true },
     paymentTerms: { type: String, trim: true },
@@ -56,4 +56,4 @@ InvoiceSchema.index({ status: 1, invoiceDate: -1 });
 InvoiceSchema.index({ totalAmount: -1 });
 InvoiceSchema.index({ 'fraudAnalysis.riskLevel': 1 });
 
-export default mongoose.model('Invoice', InvoiceSchema);
+export default mongoose.model('Invoice', InvoiceSchema);
