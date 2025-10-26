@@ -54,8 +54,14 @@ env/
 ENV/
 ocr-service/uploads/*
 ocr-service/logs/*
+ocr-service/models/*.pkl
+ocr-service/models/metadata.json
+!ocr-service/models/.gitkeep
 
-# Documentation (exclude all .md files except README.md and PROCESSING_FLOW.md)
+
+
+# Documentation (exclude all .md files except README.md, PROCESSING_FLOW.md, and ML_QUICK_START.md)
 *.md
 !README.md
 !PROCESSING_FLOW.md
+

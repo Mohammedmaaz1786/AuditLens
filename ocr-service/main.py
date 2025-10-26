@@ -252,6 +252,61 @@ async def get_cache_status():
         )
 
 
+@app.get("/api/ml/model-info")
+async def get_ml_model_info():
+    """
+    Get information about trained ML models.
+    Shows training status, model availability, and performance metrics.
+    """
+    try:
+        model_info = document_processor.fraud_detector.get_model_info()
+        
+        return {
+            "success": True,
+            "model_info": model_info,
+            "message": "ML models are active and learning from your data" if model_info["is_trained"] else "Models will train automatically when sufficient data is available"
+        }
+    except Exception as e:
+        logger.error(f"Model info error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model info error: {str(e)}"
+        )
+
+
+@app.post("/api/ml/retrain")
+async def retrain_ml_models():
+    """
+    Manually trigger ML model retraining.
+    Use this when you want to immediately update models with latest data.
+    """
+    try:
+        logger.info("🔄 Manual ML model retraining requested via API")
+        success = document_processor.fraud_detector.retrain_now()
+        
+        if success:
+            model_info = document_processor.fraud_detector.get_model_info()
+            return {
+                "success": True,
+                "message": "ML models retrained successfully",
+                "training_samples": model_info["training_data_count"],
+                "model_info": model_info
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Insufficient training data. Models will train automatically when more invoices are available.",
+                "model_info": document_processor.fraud_detector.get_model_info()
+            }
+            
+    except Exception as e:
+        logger.error(f"Model retraining error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Model retraining error: {str(e)}"
+        )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """Global exception handler"""

@@ -1,0 +1,24 @@
+# ML Models Directory
+
+This directory stores trained machine learning models for fraud detection.
+
+## Files Generated After Training
+
+- `isolation_forest.pkl` - Anomaly detection model
+- `random_forest.pkl` - Fraud classification model
+- `logistic_regression.pkl` - Binary classifier
+- `dbscan.pkl` - Clustering model
+- `scaler.pkl` - Feature scaling parameters
+- `metadata.json` - Training metadata and timestamps
+
+## Model Persistence
+
+Models are automatically:
+- Saved after training
+- Loaded on service startup
+- Updated every 24 hours (configurable)
+
+## Security Note
+
+These `.pkl` files contain only model parameters, not invoice data.
+Safe to backup and restore between environments.

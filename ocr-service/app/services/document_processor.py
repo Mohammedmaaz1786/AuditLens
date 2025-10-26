@@ -14,7 +14,8 @@ from loguru import logger
 from app.services.image_preprocessor import ImagePreprocessor
 from app.services.entity_extractor import EntityExtractor
 from app.services.ai_extractor import AIExtractor
-from app.services.fraud_detector import FraudDetector
+from app.services.fraud_detector import FraudDetector  # Rule-based fraud detection (ML coming in future)
+# from app.services.ml_fraud_detector import MLFraudDetector  # TODO: Future - ML-based fraud detection
 from app.services.azure_ocr import get_azure_ocr_service
 from app.models.schemas import InvoiceData, ProcessingResult, ProcessingMetadata, LineItem
 from app.config import settings
@@ -27,7 +28,8 @@ class DocumentProcessor:
         self.preprocessor = ImagePreprocessor()
         self.extractor = EntityExtractor()
         self.ai_extractor = AIExtractor()
-        self.fraud_detector = FraudDetector()
+        self.fraud_detector = FraudDetector()  # Rule-based fraud detection
+        # TODO: Future - self.fraud_detector = MLFraudDetector()  # ML-based fraud detection
         
         # Get OCR provider from settings (reads from .env)
         self.ocr_provider = settings.OCR_PROVIDER.lower() if settings.OCR_PROVIDER else 'tesseract'

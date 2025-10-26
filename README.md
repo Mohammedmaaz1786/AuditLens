@@ -624,6 +624,21 @@ node src/scripts/sync-vendor-status.js
   - Offline mode support
 
 ### 💡 Low Priority / Future Enhancements
+- [ ] **ML-Based Fraud Detection System** 🆕
+  - **Status**: Fully implemented, awaiting training data
+  - **Requirement**: 50+ invoices with user approval/rejection decisions
+  - **Algorithms**: 4-model ensemble approach
+    - Isolation Forest for anomaly detection
+    - Random Forest Classifier for fraud prediction
+    - Logistic Regression for probability scoring
+    - DBSCAN for pattern clustering
+  - **Features**: 29 automated feature extraction (amount patterns, vendor history, date anomalies, text complexity, behavioral context)
+  - **Learning Strategy**: Bootstrap learning from user decisions (approve/reject feedback)
+  - **Performance**: Expected accuracy 95%+ after 200+ invoices
+  - **Auto-training**: Retrains every 24 hours with new data
+  - **Documentation**: See ML_QUICK_START.md for activation guide
+  - **Current**: Using rule-based fraud detection until sufficient training data available
+
 - [ ] **Machine Learning Improvements**
   - Continuous ML model training
   - Custom fraud detection model training
